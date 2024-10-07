@@ -5,12 +5,16 @@ import cv2
 import matplotlib.pyplot as pyplot
 import numpy as np
 import matplotlib.pyplot as plt
+import json
 
 import mediapipe as mp
 from mediapipe import solutions
 from mediapipe.framework.formats import landmark_pb2
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+from json import dumps
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
 os.makedirs('models', exist_ok=True)
 face_model_url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
@@ -24,7 +28,8 @@ urllib.request.urlretrieve(hand_model_url, hand_model_path)
 MARGIN = 10  # pixels
 FONT_SIZE = 1
 FONT_THICKNESS = 1
-HANDEDNESS_TEXT_COLOR = (88, 205, 54) # vibrant green
+HANDEDNESS_TEXT_COLOR = (88, 205, 54)  # vibrant green
+
 
 def draw_landmarks_on_image(rgb_image, face_detection_result, hand_detection_result):
     annotated_image = np.copy(rgb_image)
@@ -73,26 +78,6 @@ def draw_landmarks_on_image(rgb_image, face_detection_result, hand_detection_res
 
     return annotated_image
 
-def plot_face_blendshapes_bar_graph(face_blendshapes):
-    # Extract the face blendshapes category names and scores.
-    face_blendshapes_names = [face_blendshapes_category.category_name for face_blendshapes_category in face_blendshapes]
-    face_blendshapes_scores = [face_blendshapes_category.score for face_blendshapes_category in face_blendshapes]
-    # The blendshapes are ordered in decreasing score value.
-    face_blendshapes_ranks = range(len(face_blendshapes_names))
-
-    fig, ax = plt.subplots(figsize=(12, 12))
-    bar = ax.barh(face_blendshapes_ranks, face_blendshapes_scores, label=[str(x) for x in face_blendshapes_ranks])
-    ax.set_yticks(face_blendshapes_ranks, face_blendshapes_names)
-    ax.invert_yaxis()
-
-    # Label each bar with values
-    for score, patch in zip(face_blendshapes_scores, bar.patches):
-        plt.text(patch.get_x() + patch.get_width(), patch.get_y(), f"{score:.4f}", va="top")
-
-    ax.set_xlabel('Score')
-    ax.set_title("Face Blendshapes")
-    plt.tight_layout()
-    plt.show()
 
 # Create face landmarker
 face_base_options = python.BaseOptions(model_asset_path=face_model_path)
@@ -131,11 +116,61 @@ while True:
     # Detect hand landmarks
     hand_detection_result = hand_detector.detect(mp_image)
 
+    # Serialize face and hand landmarks and save to disk
+    frame_data = {
+        "face_landmarks": [],
+        "hand_landmarks": []
+    }
+    jaw_open_values = []  # List to keep track of jaw open values
+
+    if face_detection_result.face_landmarks:
+        for blendshapes in face_detection_result.face_blendshapes:
+            for blendshape in blendshapes:
+                if blendshape.category_name == 'jawOpen':
+                    # Keep the jaw open value
+                    jaw_open_values.append(blendshape.score)
+                    print(f"mouth open value: {blendshape.score}")
+
+    if face_detection_result.face_landmarks:
+        for face_landmarks in face_detection_result.face_landmarks:
+            frame_data["face_landmarks"] = [
+                {
+                    "x": landmark.x,
+                    "y": landmark.y,
+                    "z": landmark.z,
+                    "visibility": landmark.visibility,
+                    "presence": landmark.presence
+                } for landmark in face_landmarks
+            ]
+
+    if hand_detection_result.hand_landmarks:
+        for hand_landmarks in hand_detection_result.hand_landmarks:
+            frame_data["hand_landmarks"] = [
+                {
+                    "x": landmark.x,
+                    "y": landmark.y,
+                    "z": landmark.z
+                } for landmark in hand_landmarks
+            ]
+
+    # Save frame data to a JSON file
+    with open('frame_data.json', 'w') as f:
+        json.dump(frame_data, f)
+
+    # Check the last 40 jaw open values
+    if len(jaw_open_values) > 40:
+        jaw_open_values = jaw_open_values[-40:]  # Keep only the last 40 values
+
+    if any(value > 0.2 for value in jaw_open_values):
+        print("soy face!!!")  # Log if any value is greater than 0.2
+
     # Draw landmarks on the image
-    annotated_image = draw_landmarks_on_image(rgb_frame, face_detection_result, hand_detection_result)
+    annotated_image = draw_landmarks_on_image(
+        rgb_frame, face_detection_result, hand_detection_result)
 
     # Display the resulting frame
-    cv2.imshow('Face and Hand Landmarks', cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
+    cv2.imshow('Face and Hand Landmarks', cv2.cvtColor(
+        annotated_image, cv2.COLOR_RGB2BGR))
 
     # Break the loop when 'q' is pressed
     if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -144,7 +179,3 @@ while True:
 # Release the capture and close windows
 cap.release()
 cv2.destroyAllWindows()
-
-# Plot blendshapes from the last frame (if available)
-if face_detection_result and face_detection_result.face_blendshapes:
-    plot_face_blendshapes_bar_graph(face_detection_result.face_blendshapes[0])
