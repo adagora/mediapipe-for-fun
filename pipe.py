@@ -79,6 +79,29 @@ def draw_landmarks_on_image(rgb_image, face_detection_result, hand_detection_res
     return annotated_image
 
 
+def draw_solid_sphere(image, center, radius, color=(255, 0, 0)):
+    # Draw a solid sphere on the image
+    num_points = 100
+    phi = np.linspace(0, np.pi, num_points)
+    theta = np.linspace(0, 2 * np.pi, num_points)
+    x = radius * np.outer(np.sin(phi), np.cos(theta)) + center[0]
+    y = radius * np.outer(np.sin(phi), np.sin(theta)) + center[1]
+    z = radius * np.outer(np.cos(phi), np.ones_like(theta)
+                          ) + 0  # Assuming a fixed z-plane
+
+    # Project 3D points to 2D
+    for i in range(num_points - 1):
+        for j in range(num_points - 1):
+            pt1 = (int(x[i, j]), int(y[i, j]))
+            pt2 = (int(x[i + 1, j]), int(y[i + 1, j]))
+            pt3 = (int(x[i, j + 1]), int(y[i, j + 1]))
+            pt4 = (int(x[i + 1, j + 1]), int(y[i + 1, j + 1]))
+
+            # Draw triangles to create the sphere effect
+            cv2.fillConvexPoly(image, np.array([pt1, pt2, pt4]), color)
+            cv2.fillConvexPoly(image, np.array([pt1, pt3, pt4]), color)
+
+
 # Create face landmarker
 face_base_options = python.BaseOptions(model_asset_path=face_model_path)
 face_options = vision.FaceLandmarkerOptions(base_options=face_base_options,
@@ -99,12 +122,26 @@ cap = cv2.VideoCapture(0)
 face_detection_result = None
 hand_detection_result = None
 
+# Initialize sphere properties
+sphere_radius = 50
+sphere_position = (100, 100)  # Initial position of the sphere
+
+# New variables for sticky feature
+is_sphere_stuck = False
+stuck_position = None
+stuck_time = 0
+position_history = []
+STICK_THRESHOLD = 30  # pixels
+STICK_TIME = 1.0  # seconds
+UNSTICK_TIMEOUT = 20.0  # seconds
+
+
 while True:
     # Capture frame-by-frame
     ret, frame = cap.read()
     if not ret:
-        print("Failed to grab frame")
-        break
+        print("Failed to grab frame, retrying...")
+        continue  # Retry capturing the frame instead of breaking the loop
 
     # Convert the BGR image to RGB
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -129,7 +166,6 @@ while True:
                 if blendshape.category_name == 'jawOpen':
                     # Keep the jaw open value
                     jaw_open_values.append(blendshape.score)
-                    print(f"mouth open value: {blendshape.score}")
 
     if face_detection_result.face_landmarks:
         for face_landmarks in face_detection_result.face_landmarks:
@@ -145,13 +181,13 @@ while True:
 
     if hand_detection_result.hand_landmarks:
         for hand_landmarks in hand_detection_result.hand_landmarks:
-            frame_data["hand_landmarks"] = [
+            frame_data["hand_landmarks"].append([
                 {
                     "x": landmark.x,
                     "y": landmark.y,
                     "z": landmark.z
                 } for landmark in hand_landmarks
-            ]
+            ])
 
     # Save frame data to a JSON file
     with open('frame_data.json', 'w') as f:
@@ -161,16 +197,70 @@ while True:
     if len(jaw_open_values) > 40:
         jaw_open_values = jaw_open_values[-40:]  # Keep only the last 40 values
 
-    if any(value > 0.2 for value in jaw_open_values):
-        print("soy face!!!")  # Log if any value is greater than 0.2
+    # Adjust sphere radius based on jaw open values
+    if jaw_open_values and jaw_open_values[-1] > 0.2:
+        sphere_radius = 100  # Zoom in when jaw is open
+    else:
+        sphere_radius = 50  # Default radius
 
-    # Draw landmarks on the image
+    # Update sphere position based on hand landmark
+    if hand_detection_result.hand_landmarks and not is_sphere_stuck:
+        # Use the tip of the index finger (landmark 8) to control the sphere
+        index_finger_tip = hand_detection_result.hand_landmarks[0][8]
+        new_position = (
+            int(index_finger_tip.x * frame.shape[1]),
+            int(index_finger_tip.y * frame.shape[0])
+        )
+
+        # Add new position to history
+        position_history.append(new_position)
+        if len(position_history) > 10:  # Keep only last 10 positions
+            position_history.pop(0)
+
+        # Check if the hand has been relatively still
+        if all(np.linalg.norm(np.array(new_position) - np.array(pos)) < STICK_THRESHOLD for pos in position_history):
+            if stuck_time == 0:
+                stuck_time = time.time()
+            elif time.time() - stuck_time > STICK_TIME:
+                is_sphere_stuck = True
+                stuck_position = new_position
+                print("Sphere stuck!")
+        else:
+            stuck_time = 0
+
+        sphere_position = new_position
+    elif not hand_detection_result.hand_landmarks and is_sphere_stuck:
+        # If hand is not detected and sphere is stuck, keep it at the stuck position
+        sphere_position = stuck_position
+    elif hand_detection_result.hand_landmarks and is_sphere_stuck:
+        # If hand is detected and sphere is stuck, check if it's far from the stuck position
+        index_finger_tip = hand_detection_result.hand_landmarks[0][8]
+        current_position = (
+            int(index_finger_tip.x * frame.shape[1]),
+            int(index_finger_tip.y * frame.shape[0])
+        )
+        if time.time() - stuck_time >= 5 and np.linalg.norm(np.array(current_position) - np.array(stuck_position)) > STICK_THRESHOLD * 2:
+            is_sphere_stuck = False
+            stuck_position = None
+            stuck_time = 0
+            position_history.clear()
+            print("Sphere unstuck!")
+
+    # Create a dark view instead of showing the face
+    # Create a dark image with the same shape as the frame
+    dark_view = np.zeros_like(frame)
+
+    # Draw landmarks on the dark image
     annotated_image = draw_landmarks_on_image(
-        rgb_frame, face_detection_result, hand_detection_result)
+        dark_view, face_detection_result, hand_detection_result)
+
+    # Draw the sphere at the updated position
+    draw_solid_sphere(annotated_image, sphere_position, sphere_radius, color=(
+        0, 255, 0) if is_sphere_stuck else (255, 0, 0))
 
     # Display the resulting frame
-    cv2.imshow('Face and Hand Landmarks', cv2.cvtColor(
-        annotated_image, cv2.COLOR_RGB2BGR))
+    cv2.imshow('Face and Hand Landmarks with Controlled Sphere',
+               cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
 
     # Break the loop when 'q' is pressed
     if cv2.waitKey(1) & 0xFF == ord('q'):
